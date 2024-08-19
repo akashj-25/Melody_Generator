@@ -5,135 +5,121 @@ import music21 as m21
 from preprocess import SEQUENCE_LENGTH, MAPPING_PATH
 
 class MelodyGenerator:
-    """A class that wraps the LSTM model and offers utilities to generate melodies."""
+    """Generates melodies using a pre-trained LSTM model."""
 
     def __init__(self, model_path="model.h5"):
-        """Constructor that initialises TensorFlow model"""
-
+        # Load the trained LSTM model and note mappings
         self.model_path = model_path
         self.model = keras.models.load_model(model_path)
 
         with open(MAPPING_PATH, "r") as fp:
             self._mappings = json.load(fp)
 
-        self._start_symbols = ["/"] * SEQUENCE_LENGTH
+        self._start_symbols = ["/"] * SEQUENCE_LENGTH  # Padding for initial sequence
 
 
     def generate_melody(self, seed, num_steps, max_sequence_length, temperature):
-        """Generates a melody using the DL model and returns a midi file.
+        """Generates a melody sequence based on a seed and returns it as a list of symbols.
 
-        :param seed (str): Melody seed with the notation used to encode the dataset
-        :param num_steps (int): Number of steps to be generated
-        :param max_sequence_len (int): Max number of steps in seed to be considered for generation
-        :param temperature (float): Float in interval [0, 1]. Numbers closer to 0 make the model more deterministic.
-            A number closer to 1 makes the generation more unpredictable.
+        :param seed (str): The starting sequence for the melody.
+        :param num_steps (int): Number of steps to generate after the seed.
+        :param max_sequence_length (int): Maximum sequence length considered for model input.
+        :param temperature (float): Controls randomness in the output (higher values = more randomness).
 
-        :return melody (list of str): List with symbols representing a melody
+        :return melody (list of str): Generated sequence of melody symbols.
         """
 
-        # create seed with start symbols
+        # Prepare the seed with start symbols and convert to integer representation
         seed = seed.split()
         melody = seed
         seed = self._start_symbols + seed
-
-        # map seed to int
         seed = [self._mappings[symbol] for symbol in seed]
 
         for _ in range(num_steps):
 
-            # limit the seed to max_sequence_length
+            # Trim seed to fit the maximum input length for the model
             seed = seed[-max_sequence_length:]
 
-            # one-hot encode the seed
+            # One-hot encode the seed sequence for model input
             onehot_seed = keras.utils.to_categorical(seed, num_classes=len(self._mappings))
-            # (1, max_sequence_length, num of symbols in the vocabulary)
             onehot_seed = onehot_seed[np.newaxis, ...]
 
-            # make a prediction
+            # Predict the next symbol based on the current seed
             probabilities = self.model.predict(onehot_seed)[0]
-            # [0.1, 0.2, 0.1, 0.6] -> 1
+
+            # Sample the next symbol using temperature to adjust randomness
             output_int = self._sample_with_temperature(probabilities, temperature)
 
-            # update seed
+            # Add the predicted symbol to the seed and melody
             seed.append(output_int)
-
-            # map int to our encoding
             output_symbol = [k for k, v in self._mappings.items() if v == output_int][0]
 
-            # check whether we're at the end of a melody
+            # Stop if the end symbol is reached
             if output_symbol == "/":
                 break
 
-            # update melody
             melody.append(output_symbol)
 
         return melody
 
 
     def _sample_with_temperature(self, probabilites, temperature):
-        """Samples an index from a probability array reapplying softmax using temperature
+        """Selects an index from a probability distribution after applying temperature scaling.
 
-        :param predictions (nd.array): Array containing probabilities for each of the possible outputs.
-        :param temperature (float): Float in interval [0, 1]. Numbers closer to 0 make the model more deterministic.
-            A number closer to 1 makes the generation more unpredictable.
+        :param predictions (nd.array): Model output probabilities for each possible symbol.
+        :param temperature (float): Value to control randomness; lower values lead to more predictable outputs.
 
-        :return index (int): Selected output symbol
+        :return index (int): The chosen index representing the next symbol.
         """
         predictions = np.log(probabilites) / temperature
         probabilites = np.exp(predictions) / np.sum(np.exp(predictions))
 
-        choices = range(len(probabilites)) # [0, 1, 2, 3]
+        # Sample an index based on the adjusted probabilities
+        choices = range(len(probabilites))
         index = np.random.choice(choices, p=probabilites)
 
         return index
 
 
     def save_melody(self, melody, step_duration=0.25, format="midi", file_name="mel.mid"):
-        """Converts a melody into a MIDI file
+        """Converts a melody list into a MIDI file.
 
-        :param melody (list of str):
-        :param min_duration (float): Duration of each time step in quarter length
-        :param file_name (str): Name of midi file
-        :return:
+        :param melody (list of str): The generated melody as a list of symbols.
+        :param step_duration (float): Duration of each step in quarter lengths.
+        :param file_name (str): Name of the file to save the melody.
         """
 
-        # create a music21 stream
+        # Initialize a music21 stream to hold the notes/rests
         stream = m21.stream.Stream()
 
         start_symbol = None
         step_counter = 1
 
-        # parse all the symbols in the melody and create note/rest objects
+        # Convert each symbol in the melody to a music21 note/rest
         for i, symbol in enumerate(melody):
 
-            # handle case in which we have a note/rest
             if symbol != "_" or i + 1 == len(melody):
 
-                # ensure we're dealing with note/rest beyond the first one
                 if start_symbol is not None:
+                    # Calculate the duration for the current note/rest
+                    quarter_length_duration = step_duration * step_counter
 
-                    quarter_length_duration = step_duration * step_counter # 0.25 * 4 = 1
-
-                    # handle rest
+                    # Create a Rest or Note object based on the symbol
                     if start_symbol == "r":
                         m21_event = m21.note.Rest(quarterLength=quarter_length_duration)
-
-                    # handle note
                     else:
                         m21_event = m21.note.Note(int(start_symbol), quarterLength=quarter_length_duration)
 
                     stream.append(m21_event)
-
-                    # reset the step counter
                     step_counter = 1
 
                 start_symbol = symbol
 
-            # handle case in which we have a prolongation sign "_"
             else:
+                # Increment duration if the symbol is a prolongation "_"
                 step_counter += 1
 
-        # write the m21 stream to a midi file
+        # Save the stream as a MIDI file
         stream.write(format, file_name)
 
 
